@@ -71,16 +71,22 @@ Agent: The weather in London is sunny with a temperature of 22°C...
 import "google.golang.org/adk/model/openai"
 
 // Create OpenAI model adapter
-model, _ := openai.NewModel("google/gemma-3-12b", &openai.Config{
+model, err := openai.NewModel("google/gemma-3-12b", &openai.Config{
     BaseURL: "http://localhost:1234/v1",
 })
+if err != nil {
+    // Handle error
+}
 
 // Create agent with tools
-agent, _ := llmagent.New(llmagent.Config{
+agent, err := llmagent.New(llmagent.Config{
     Name:  "my_assistant",
     Model: model,
     Tools: []tool.Tool{/* your tools */},
 })
+if err != nil {
+    // Handle error
+}
 ```
 
 ### 🏗️ Architecture

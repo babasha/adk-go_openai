@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -358,30 +359,23 @@ func (te *ToolExecutor) findDependencies(tc ToolCall, allCalls []ToolCall) []int
 }
 
 // containsReference checks if a string contains a reference to a tool call ID.
+// Uses word boundaries to avoid false positives (e.g., "call_abc" matching "call_abc123").
 func containsReference(args string, callID string) bool {
-	// Check for various reference patterns:
-	// - "${call_id}"
-	// - "call_id" (as a value)
-	// - call_id (without quotes)
-
-	// Simple substring check - in production would use more sophisticated parsing
-	return len(args) > 0 && len(callID) > 0 &&
-		(containsSubstring(args, "${"+callID+"}") ||
-		 containsSubstring(args, "\""+callID+"\"") ||
-		 containsSubstring(args, callID))
-}
-
-// containsSubstring is a helper to check substring presence.
-func containsSubstring(s, substr string) bool {
-	if len(substr) == 0 {
+	if len(args) == 0 || len(callID) == 0 {
 		return false
 	}
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
+
+	// Using word boundaries `\b` is more robust than a simple substring check to avoid false positives.
+	// regexp.QuoteMeta ensures special regex characters in callID are escaped properly.
+	pattern := `\b` + regexp.QuoteMeta(callID) + `\b`
+
+	// An error from regexp.MatchString with a quoted meta string is highly unlikely,
+	// but we handle it gracefully by returning false (no match).
+	matched, err := regexp.MatchString(pattern, args)
+	if err != nil {
+		return false
 	}
-	return false
+	return matched
 }
 
 // buildExecutionBatches creates batches of tool calls that can be executed in order.

@@ -16,7 +16,9 @@ package openai
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -373,9 +375,12 @@ func (m *openaiModel) convertTools(adkTools map[string]any) []Tool {
 // Note: Session ID extraction moved to session.go
 
 func generateToolCallID(functionName string) string {
-	// Generate a deterministic ID based on function name
-	// In production, this should be unique per call
-	return fmt.Sprintf("call_%s", functionName)
+	// Generate a unique ID to avoid collisions if the same function is called multiple times.
+	// Using crypto/rand ensures uniqueness even for parallel calls.
+	randomBytes := make([]byte, 4)
+	// crypto/rand is safe for concurrent use - ignore error as it's extremely rare
+	rand.Read(randomBytes)
+	return fmt.Sprintf("call_%s_%s", functionName, hex.EncodeToString(randomBytes))
 }
 
 // convertContentToMessage converts content parts to the appropriate format.
@@ -394,22 +399,4 @@ func convertContentToMessage(parts []any) interface{} {
 
 	// Otherwise return array for multimodal content
 	return parts
-}
-
-func joinTextParts(parts []string) string {
-	if len(parts) == 0 {
-		return ""
-	}
-	if len(parts) == 1 {
-		return parts[0]
-	}
-
-	result := ""
-	for i, part := range parts {
-		if i > 0 {
-			result += "\n"
-		}
-		result += part
-	}
-	return result
 }
