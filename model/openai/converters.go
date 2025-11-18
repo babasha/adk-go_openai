@@ -19,6 +19,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
@@ -33,6 +34,51 @@ import (
 func (m *openaiModel) convertToOpenAIMessages(ctx context.Context, req *model.LLMRequest) ([]OpenAIMessage, error) {
 	// Extract session ID from context with logging
 	sessionID := extractSessionIDWithLogging(ctx, m.logger)
+
+	// Initialize result slice
+	var allMessages []OpenAIMessage
+
+	// Add SystemInstruction if present (must be first message with role "system")
+	var systemText string
+	if req.Config != nil && req.Config.SystemInstruction != nil {
+		for _, part := range req.Config.SystemInstruction.Parts {
+			if part.Text != "" {
+				if systemText != "" {
+					systemText += "\n"
+				}
+				systemText += part.Text
+			}
+		}
+	}
+
+	// JSON Mode Safety: OpenAI requires "JSON" keyword in prompt when using json_object mode
+	jsonModeEnabled := req.Config != nil && req.Config.ResponseMIMEType == "application/json"
+	if jsonModeEnabled {
+		// Check if "JSON" keyword exists in system instruction
+		hasJSONKeyword := strings.Contains(strings.ToUpper(systemText), "JSON")
+
+		if !hasJSONKeyword {
+			// Add JSON instruction to system prompt
+			jsonInstruction := "You must respond with valid JSON."
+			if systemText != "" {
+				systemText = systemText + "\n\n" + jsonInstruction
+			} else {
+				systemText = jsonInstruction
+			}
+
+			if m.logger != nil {
+				m.logger.Printf("INFO: JSON mode enabled - added JSON instruction to system prompt")
+			}
+		}
+	}
+
+	// Add system message if we have any system text
+	if systemText != "" {
+		allMessages = append(allMessages, OpenAIMessage{
+			Role:    "system",
+			Content: systemText,
+		})
+	}
 
 	// Get existing history
 	history := m.getConversationHistory(sessionID)
@@ -53,16 +99,15 @@ func (m *openaiModel) convertToOpenAIMessages(ctx context.Context, req *model.LL
 	// Add new messages to history
 	m.addToHistory(sessionID, newMessages...)
 
-	// Return complete history as slice of values (not pointers)
-	result := make([]OpenAIMessage, len(history)+len(newMessages))
-	for i, msg := range history {
-		result[i] = *msg
+	// Combine: System + History + New messages
+	for _, msg := range history {
+		allMessages = append(allMessages, *msg)
 	}
-	for i, msg := range newMessages {
-		result[len(history)+i] = *msg
+	for _, msg := range newMessages {
+		allMessages = append(allMessages, *msg)
 	}
 
-	return result, nil
+	return allMessages, nil
 }
 
 // convertContent converts a single genai.Content to one or more OpenAI messages.
@@ -83,14 +128,18 @@ func (m *openaiModel) convertContent(content *genai.Content) ([]*OpenAIMessage, 
 	messages := make([]*OpenAIMessage, 0)
 
 	// Handle different part types
-	var textParts []string
+	var contentParts []any // Use interface slice for multimodal content (text + images)
 	var toolCalls []ToolCall
 	var functionResponses []*OpenAIMessage
 
 	for _, part := range content.Parts {
 		switch {
 		case part.Text != "":
-			textParts = append(textParts, part.Text)
+			// Add as text content part
+			contentParts = append(contentParts, ContentPartText{
+				Type: "text",
+				Text: part.Text,
+			})
 
 		case part.FunctionCall != nil:
 			// Convert function call to tool call
@@ -109,9 +158,14 @@ func (m *openaiModel) convertContent(content *genai.Content) ([]*OpenAIMessage, 
 				}
 			}
 
-			// Use ID from FunctionCall if available, otherwise generate one
+			// Use ID from FunctionCall - MUST be present for OpenAI API
 			toolCallID := part.FunctionCall.ID
 			if toolCallID == "" {
+				// CRITICAL: OpenAI API requires tool_call_id to match exactly
+				// If we generate a fake ID, the response will be rejected with 400 error
+				if m.logger != nil {
+					m.logger.Printf("WARNING: FunctionCall missing ID for '%s' - generating fallback ID. This may cause API errors!", part.FunctionCall.Name)
+				}
 				toolCallID = generateToolCallID(part.FunctionCall.Name)
 			}
 
@@ -131,10 +185,12 @@ func (m *openaiModel) convertContent(content *genai.Content) ([]*OpenAIMessage, 
 				return nil, fmt.Errorf("failed to marshal function response: %w", err)
 			}
 
-			// Use ID from FunctionResponse if available, otherwise generate one
+			// Use ID from FunctionResponse - MUST match the original tool_call_id
 			toolCallID := part.FunctionResponse.ID
 			if toolCallID == "" {
-				toolCallID = generateToolCallID(part.FunctionResponse.Name)
+				// CRITICAL: This is a serious problem!
+				// OpenAI will reject the response with 400 if tool_call_id doesn't match
+				return nil, fmt.Errorf("FunctionResponse for '%s' missing required ID field - cannot match with tool call", part.FunctionResponse.Name)
 			}
 
 			functionResponses = append(functionResponses, &OpenAIMessage{
@@ -146,32 +202,55 @@ func (m *openaiModel) convertContent(content *genai.Content) ([]*OpenAIMessage, 
 		case part.ExecutableCode != nil:
 			// Represent executable code as text
 			codeText := fmt.Sprintf("```%s\n%s\n```", part.ExecutableCode.Language, part.ExecutableCode.Code)
-			textParts = append(textParts, codeText)
+			contentParts = append(contentParts, ContentPartText{
+				Type: "text",
+				Text: codeText,
+			})
 
 		case part.CodeExecutionResult != nil:
 			// Represent code execution result as text
 			resultText := fmt.Sprintf("Execution result (%s): %s", part.CodeExecutionResult.Outcome, part.CodeExecutionResult.Output)
-			textParts = append(textParts, resultText)
+			contentParts = append(contentParts, ContentPartText{
+				Type: "text",
+				Text: resultText,
+			})
 
 		case part.InlineData != nil:
-			// OpenAI supports vision for images
+			// OpenAI supports vision for images via multimodal content
 			if part.InlineData.MIMEType != "" && len(part.InlineData.Data) > 0 {
 				// Encode image as base64 data URL
 				imageURL := fmt.Sprintf("data:%s;base64,%s",
 					part.InlineData.MIMEType,
 					base64.StdEncoding.EncodeToString(part.InlineData.Data))
 
-				// Mark as image for multimodal content (stored temporarily as text)
-				// The actual multimodal format conversion happens when creating the message
-				textParts = append(textParts, imageURL)
+				// Add as image content part (NOT as text!)
+				contentParts = append(contentParts, ContentPartImage{
+					Type: "image_url",
+					ImageURL: struct {
+						URL string `json:"url"`
+					}{URL: imageURL},
+				})
 			}
 
 		case part.FileData != nil:
 			// File URIs (e.g., gs://, https://, file://)
 			if part.FileData.FileURI != "" {
-				// For HTTP(S) image URLs, they can be used directly
-				// Store as text for now, will be converted to proper format if needed
-				textParts = append(textParts, part.FileData.FileURI)
+				// For HTTP(S) image URLs, add as image content part
+				// For other URIs, add as text
+				if strings.HasPrefix(part.FileData.FileURI, "http://") ||
+					strings.HasPrefix(part.FileData.FileURI, "https://") {
+					contentParts = append(contentParts, ContentPartImage{
+						Type: "image_url",
+						ImageURL: struct {
+							URL string `json:"url"`
+						}{URL: part.FileData.FileURI},
+					})
+				} else {
+					contentParts = append(contentParts, ContentPartText{
+						Type: "text",
+						Text: part.FileData.FileURI,
+					})
+				}
 			}
 		}
 	}
@@ -183,15 +262,16 @@ func (m *openaiModel) convertContent(content *genai.Content) ([]*OpenAIMessage, 
 			Role:      "assistant",
 			ToolCalls: toolCalls,
 		}
-		if len(textParts) > 0 {
-			msg.Content = joinTextParts(textParts)
+		if len(contentParts) > 0 {
+			// Use array format for multimodal or single text part
+			msg.Content = convertContentToMessage(contentParts)
 		}
 		messages = append(messages, msg)
-	} else if len(textParts) > 0 {
-		// Regular text message
+	} else if len(contentParts) > 0 {
+		// Regular message (text or multimodal)
 		messages = append(messages, &OpenAIMessage{
 			Role:    role,
-			Content: joinTextParts(textParts),
+			Content: convertContentToMessage(contentParts),
 		})
 	}
 
@@ -215,8 +295,14 @@ func (m *openaiModel) convertToLLMResponse(msg *OpenAIMessage, usage *Usage) (*m
 	// Handle tool calls (function calls in genai format)
 	for _, toolCall := range msg.ToolCalls {
 		if toolCall.Type == "function" {
+			// Handle empty arguments (some models send "" or "{}")
+			argsStr := toolCall.Function.Arguments
+			if argsStr == "" {
+				argsStr = "{}" // Default to empty object
+			}
+
 			var args map[string]any
-			if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
+			if err := json.Unmarshal([]byte(argsStr), &args); err != nil {
 				return nil, fmt.Errorf("failed to unmarshal tool call args: %w", err)
 			}
 
@@ -290,6 +376,24 @@ func generateToolCallID(functionName string) string {
 	// Generate a deterministic ID based on function name
 	// In production, this should be unique per call
 	return fmt.Sprintf("call_%s", functionName)
+}
+
+// convertContentToMessage converts content parts to the appropriate format.
+// Returns string if single text part (optimization), array otherwise (multimodal).
+func convertContentToMessage(parts []any) interface{} {
+	if len(parts) == 0 {
+		return ""
+	}
+
+	// Optimization: if only one text part, return as string
+	if len(parts) == 1 {
+		if textPart, ok := parts[0].(ContentPartText); ok {
+			return textPart.Text
+		}
+	}
+
+	// Otherwise return array for multimodal content
+	return parts
 }
 
 func joinTextParts(parts []string) string {

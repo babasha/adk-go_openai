@@ -139,6 +139,7 @@ func (m *openaiModel) processSSEStream(reader io.Reader, yield func(*model.LLMRe
 	var aggregatedText strings.Builder
 	var aggregatedToolCalls []ToolCall
 	var lastChunk *StreamChunk
+	var finalSent bool // Track if we've already sent the final response
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -153,8 +154,8 @@ func (m *openaiModel) processSSEStream(reader io.Reader, yield func(*model.LLMRe
 
 		// Check for end of stream
 		if data == "[DONE]" {
-			// Send final aggregated response
-			if aggregatedText.Len() > 0 || len(aggregatedToolCalls) > 0 {
+			// Only send final response if we haven't already sent it via FinishReason
+			if !finalSent && (aggregatedText.Len() > 0 || len(aggregatedToolCalls) > 0) {
 				finalResp := m.createFinalResponse(aggregatedText.String(), aggregatedToolCalls)
 				if !yield(finalResp, nil) {
 					return nil
@@ -223,6 +224,7 @@ func (m *openaiModel) processSSEStream(reader io.Reader, yield func(*model.LLMRe
 			if !yield(finalResp, nil) {
 				return nil
 			}
+			finalSent = true // Mark that we've sent the final response
 			return nil
 		}
 	}
@@ -290,11 +292,21 @@ func (m *openaiModel) createFinalResponse(text string, toolCalls []ToolCall) *mo
 	// Convert tool calls to function calls
 	for _, toolCall := range toolCalls {
 		if toolCall.Type == "function" {
-			var args map[string]any
-			if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
-				// Log error but continue
-				continue
+			// Handle empty arguments (some models send "" or "{}")
+			argsStr := toolCall.Function.Arguments
+			if argsStr == "" {
+				argsStr = "{}" // Default to empty object
 			}
+
+			var args map[string]any
+			if err := json.Unmarshal([]byte(argsStr), &args); err != nil {
+				// Log error but continue with empty args
+				if m.logger != nil {
+					m.logger.Printf("WARNING: Failed to unmarshal tool call args for %s: %v", toolCall.Function.Name, err)
+				}
+				args = make(map[string]any)
+			}
+
 			// Create FunctionCall part with ID preserved
 			part := genai.NewPartFromFunctionCall(toolCall.Function.Name, args)
 			if part.FunctionCall != nil {

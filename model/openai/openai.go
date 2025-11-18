@@ -86,6 +86,19 @@ type ResponseFormat struct {
 	Type string `json:"type"` // "text" or "json_object"
 }
 
+// ContentPart represents a part of multimodal content (text or image)
+type ContentPartText struct {
+	Type string `json:"type"` // "text"
+	Text string `json:"text"`
+}
+
+type ContentPartImage struct {
+	Type     string `json:"type"` // "image_url"
+	ImageURL struct {
+		URL string `json:"url"`
+	} `json:"image_url"`
+}
+
 // ChatCompletionRequest represents an OpenAI chat completion request.
 type ChatCompletionRequest struct {
 	Model          string          `json:"model"`
