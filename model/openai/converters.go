@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"google.golang.org/adk/model"
@@ -284,7 +285,7 @@ func (m *openaiModel) convertContent(content *genai.Content) ([]*OpenAIMessage, 
 }
 
 // convertToLLMResponse converts an OpenAI message back to genai format.
-func (m *openaiModel) convertToLLMResponse(msg *OpenAIMessage, usage *Usage) (*model.LLMResponse, error) {
+func (m *openaiModel) convertToLLMResponse(msg *OpenAIMessage, usage *Usage, logprobs *ChoiceLogprobs) (*model.LLMResponse, error) {
 	parts := make([]*genai.Part, 0)
 
 	// Handle text content
@@ -336,14 +337,71 @@ func (m *openaiModel) convertToLLMResponse(msg *OpenAIMessage, usage *Usage) (*m
 		}
 	}
 
+	// Add logprobs if available
+	if logprobs != nil && len(logprobs.Content) > 0 {
+		response.LogprobsResult = convertLogprobs(logprobs)
+		// Calculate average logprobs
+		var sum float64
+		for _, lp := range logprobs.Content {
+			sum += lp.Logprob
+		}
+		response.AvgLogprobs = sum / float64(len(logprobs.Content))
+	}
+
 	return response, nil
 }
 
-// convertTools converts ADK tools to OpenAI tool format.
-func (m *openaiModel) convertTools(adkTools map[string]any) []Tool {
-	tools := make([]Tool, 0)
+// convertLogprobs converts OpenAI logprobs to genai format.
+func convertLogprobs(logprobs *ChoiceLogprobs) *genai.LogprobsResult {
+	if logprobs == nil || len(logprobs.Content) == 0 {
+		return nil
+	}
 
-	for name, toolDef := range adkTools {
+	result := &genai.LogprobsResult{
+		ChosenCandidates: make([]*genai.LogprobsResultCandidate, len(logprobs.Content)),
+		TopCandidates:    make([]*genai.LogprobsResultTopCandidates, len(logprobs.Content)),
+	}
+
+	for i, lp := range logprobs.Content {
+		// Chosen candidate
+		result.ChosenCandidates[i] = &genai.LogprobsResultCandidate{
+			Token:          lp.Token,
+			LogProbability: float32(lp.Logprob),
+		}
+
+		// Top candidates
+		if len(lp.TopLogprobs) > 0 {
+			topCandidates := make([]*genai.LogprobsResultCandidate, len(lp.TopLogprobs))
+			for j, top := range lp.TopLogprobs {
+				topCandidates[j] = &genai.LogprobsResultCandidate{
+					Token:          top.Token,
+					LogProbability: float32(top.Logprob),
+				}
+			}
+			result.TopCandidates[i] = &genai.LogprobsResultTopCandidates{
+				Candidates: topCandidates,
+			}
+		}
+	}
+
+	return result
+}
+
+// convertTools converts ADK tools to OpenAI tool format.
+// Tools are sorted by name for deterministic order (important for testing and reproducibility).
+func (m *openaiModel) convertTools(adkTools map[string]any) []Tool {
+	// Extract and sort tool names for deterministic order
+	names := make([]string, 0, len(adkTools))
+	for name := range adkTools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	tools := make([]Tool, 0, len(adkTools))
+
+	for _, name := range names {
+		toolDef := adkTools[name]
+
 		// Try to extract tool information
 		// ADK tools are typically in a specific format
 		tool := Tool{
@@ -399,4 +457,102 @@ func convertContentToMessage(parts []any) interface{} {
 
 	// Otherwise return array for multimodal content
 	return parts
+}
+
+// convertGenaiSchemaToMap converts a genai.Schema to a map for JSON Schema.
+func convertGenaiSchemaToMap(schema *genai.Schema) map[string]any {
+	if schema == nil {
+		return nil
+	}
+
+	result := make(map[string]any)
+
+	// Type mapping
+	if schema.Type != "" {
+		result["type"] = strings.ToLower(string(schema.Type))
+	}
+
+	if schema.Format != "" {
+		result["format"] = schema.Format
+	}
+
+	if schema.Description != "" {
+		result["description"] = schema.Description
+	}
+
+	if schema.Title != "" {
+		result["title"] = schema.Title
+	}
+
+	// Enum values
+	if len(schema.Enum) > 0 {
+		result["enum"] = schema.Enum
+	}
+
+	// Array items
+	if schema.Items != nil {
+		result["items"] = convertGenaiSchemaToMap(schema.Items)
+	}
+
+	// Object properties
+	if len(schema.Properties) > 0 {
+		props := make(map[string]any)
+		for name, propSchema := range schema.Properties {
+			props[name] = convertGenaiSchemaToMap(propSchema)
+		}
+		result["properties"] = props
+	}
+
+	// Required fields
+	if len(schema.Required) > 0 {
+		result["required"] = schema.Required
+	}
+
+	// Nullable
+	if schema.Nullable != nil && *schema.Nullable {
+		// JSON Schema uses array type for nullable: ["string", "null"]
+		if t, ok := result["type"].(string); ok {
+			result["type"] = []string{t, "null"}
+		}
+	}
+
+	// Min/Max for numbers
+	if schema.Minimum != nil {
+		result["minimum"] = *schema.Minimum
+	}
+	if schema.Maximum != nil {
+		result["maximum"] = *schema.Maximum
+	}
+
+	// Min/Max for arrays
+	if schema.MinItems != nil {
+		result["minItems"] = *schema.MinItems
+	}
+	if schema.MaxItems != nil {
+		result["maxItems"] = *schema.MaxItems
+	}
+
+	// Min/Max for strings
+	if schema.MinLength != nil {
+		result["minLength"] = *schema.MinLength
+	}
+	if schema.MaxLength != nil {
+		result["maxLength"] = *schema.MaxLength
+	}
+
+	// Pattern for strings
+	if schema.Pattern != "" {
+		result["pattern"] = schema.Pattern
+	}
+
+	// AnyOf
+	if len(schema.AnyOf) > 0 {
+		anyOf := make([]map[string]any, len(schema.AnyOf))
+		for i, s := range schema.AnyOf {
+			anyOf[i] = convertGenaiSchemaToMap(s)
+		}
+		result["anyOf"] = anyOf
+	}
+
+	return result
 }

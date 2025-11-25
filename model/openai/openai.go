@@ -15,7 +15,39 @@
 // Package openai implements the [model.LLM] interface for OpenAI-compatible APIs.
 // This includes OpenAI API, LM Studio, Ollama, LocalAI and other compatible endpoints.
 //
-// Compatibility notes:
+// # Basic Usage
+//
+//	model, err := openai.NewModel("gpt-4", &openai.Config{
+//	    BaseURL: "https://api.openai.com/v1",
+//	    APIKey:  os.Getenv("OPENAI_API_KEY"),
+//	})
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	defer model.(*openaiModel).Close() // Important: prevents goroutine leak
+//
+// # Session Management
+//
+// The adapter maintains conversation history per session. To enable multi-turn
+// conversations, you must pass a session ID in the context:
+//
+//	ctx := openai.WithSessionID(context.Background(), "user-123")
+//	model.GenerateContent(ctx, req, false)
+//
+// Without a session ID, each request starts a new conversation and history is lost.
+// If no session ID is provided, a UUID is auto-generated (with a warning logged).
+//
+// # Resource Cleanup
+//
+// The model starts a background goroutine for session cleanup. Call Close() when
+// the model is no longer needed to prevent goroutine leaks:
+//
+//	if closer, ok := model.(interface{ Close() error }); ok {
+//	    defer closer.Close()
+//	}
+//
+// # Compatibility Notes
+//
 //   - Works with any OpenAI-compatible endpoint (just set BaseURL)
 //   - API key is optional (for local servers like Ollama/LM Studio)
 //   - Only sends standard headers (no cloud-specific headers)
@@ -83,7 +115,15 @@ type Function struct {
 
 // ResponseFormat specifies the format of the model's output
 type ResponseFormat struct {
-	Type string `json:"type"` // "text" or "json_object"
+	Type       string         `json:"type"`                  // "text", "json_object", or "json_schema"
+	JSONSchema *JSONSchemaRef `json:"json_schema,omitempty"` // For structured outputs
+}
+
+// JSONSchemaRef references a JSON schema for structured outputs
+type JSONSchemaRef struct {
+	Name   string         `json:"name"`
+	Schema map[string]any `json:"schema"`
+	Strict bool           `json:"strict,omitempty"`
 }
 
 // ContentPart represents a part of multimodal content (text or image)
@@ -101,14 +141,22 @@ type ContentPartImage struct {
 
 // ChatCompletionRequest represents an OpenAI chat completion request.
 type ChatCompletionRequest struct {
-	Model          string          `json:"model"`
-	Messages       []OpenAIMessage `json:"messages"`
-	Temperature    *float32        `json:"temperature,omitempty"`
-	MaxTokens      *int32          `json:"max_tokens,omitempty"`
-	Tools          []Tool          `json:"tools,omitempty"`
-	ToolChoice     interface{}     `json:"tool_choice,omitempty"`
-	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
-	Stream         bool            `json:"stream,omitempty"`
+	Model            string          `json:"model"`
+	Messages         []OpenAIMessage `json:"messages"`
+	Temperature      *float32        `json:"temperature,omitempty"`
+	TopP             *float32        `json:"top_p,omitempty"`
+	N                int32           `json:"n,omitempty"`
+	MaxTokens        *int32          `json:"max_tokens,omitempty"`
+	Stop             []string        `json:"stop,omitempty"`
+	PresencePenalty  *float32        `json:"presence_penalty,omitempty"`
+	FrequencyPenalty *float32        `json:"frequency_penalty,omitempty"`
+	Seed             *int32          `json:"seed,omitempty"`
+	Tools            []Tool          `json:"tools,omitempty"`
+	ToolChoice       interface{}     `json:"tool_choice,omitempty"`
+	ResponseFormat   *ResponseFormat `json:"response_format,omitempty"`
+	Stream           bool            `json:"stream,omitempty"`
+	Logprobs         bool            `json:"logprobs,omitempty"`
+	TopLogprobs      *int32          `json:"top_logprobs,omitempty"`
 }
 
 // ChatCompletionResponse represents an OpenAI chat completion response.
@@ -123,10 +171,31 @@ type ChatCompletionResponse struct {
 
 // Choice represents a completion choice.
 type Choice struct {
-	Index        int           `json:"index"`
-	Message      OpenAIMessage `json:"message"`
-	Delta        OpenAIMessage `json:"delta,omitempty"`
-	FinishReason string        `json:"finish_reason,omitempty"`
+	Index        int              `json:"index"`
+	Message      OpenAIMessage    `json:"message"`
+	Delta        OpenAIMessage    `json:"delta,omitempty"`
+	FinishReason string           `json:"finish_reason,omitempty"`
+	Logprobs     *ChoiceLogprobs  `json:"logprobs,omitempty"`
+}
+
+// ChoiceLogprobs contains log probability information for the choice.
+type ChoiceLogprobs struct {
+	Content []TokenLogprob `json:"content,omitempty"`
+}
+
+// TokenLogprob represents log probability information for a single token.
+type TokenLogprob struct {
+	Token       string            `json:"token"`
+	Logprob     float64           `json:"logprob"`
+	Bytes       []int             `json:"bytes,omitempty"`
+	TopLogprobs []TopTokenLogprob `json:"top_logprobs,omitempty"`
+}
+
+// TopTokenLogprob represents a top candidate token with its log probability.
+type TopTokenLogprob struct {
+	Token   string  `json:"token"`
+	Logprob float64 `json:"logprob"`
+	Bytes   []int   `json:"bytes,omitempty"`
 }
 
 // Usage represents token usage statistics.
@@ -308,6 +377,10 @@ type openaiModel struct {
 
 	// JSON pool for performance
 	jsonPool sync.Pool
+
+	// Cleanup goroutine control
+	stopCleanup chan struct{}
+	cleanupDone chan struct{}
 }
 
 // NewModel creates a new OpenAI-compatible model adapter.
@@ -367,6 +440,8 @@ func NewModel(modelName string, cfg *Config) (model.LLM, error) {
 				return new(bytes.Buffer)
 			},
 		},
+		stopCleanup: make(chan struct{}),
+		cleanupDone: make(chan struct{}),
 	}
 
 	// Start cleanup goroutine for expired sessions
@@ -392,20 +467,36 @@ func (m *openaiModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 }
 
 // cleanupExpiredSessions removes old conversation states periodically.
+// This goroutine runs until Close() is called.
 func (m *openaiModel) cleanupExpiredSessions() {
+	defer close(m.cleanupDone)
+
 	ticker := time.NewTicker(m.sessionTTL / 2)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		m.mu.Lock()
-		now := time.Now()
-		for sessionID, state := range m.conversations {
-			if now.Sub(state.lastAccess) > m.sessionTTL {
-				delete(m.conversations, sessionID)
+	for {
+		select {
+		case <-m.stopCleanup:
+			return
+		case <-ticker.C:
+			m.mu.Lock()
+			now := time.Now()
+			for sessionID, state := range m.conversations {
+				if now.Sub(state.lastAccess) > m.sessionTTL {
+					delete(m.conversations, sessionID)
+				}
 			}
+			m.mu.Unlock()
 		}
-		m.mu.Unlock()
 	}
+}
+
+// Close stops the background cleanup goroutine and releases resources.
+// This should be called when the model is no longer needed to prevent goroutine leaks.
+func (m *openaiModel) Close() error {
+	close(m.stopCleanup)
+	<-m.cleanupDone // Wait for cleanup goroutine to finish
+	return nil
 }
 
 // getConversationHistory retrieves the conversation history for a session.
@@ -518,9 +609,34 @@ func (m *openaiModel) generate(ctx context.Context, req *model.LLMRequest) (*mod
 		if req.Config.Temperature != nil {
 			chatReq.Temperature = req.Config.Temperature
 		}
+		if req.Config.TopP != nil {
+			chatReq.TopP = req.Config.TopP
+		}
 		if req.Config.MaxOutputTokens > 0 {
 			tokens := req.Config.MaxOutputTokens
 			chatReq.MaxTokens = &tokens
+		}
+		if len(req.Config.StopSequences) > 0 {
+			chatReq.Stop = req.Config.StopSequences
+		}
+		if req.Config.PresencePenalty != nil {
+			chatReq.PresencePenalty = req.Config.PresencePenalty
+		}
+		if req.Config.FrequencyPenalty != nil {
+			chatReq.FrequencyPenalty = req.Config.FrequencyPenalty
+		}
+		if req.Config.Seed != nil {
+			chatReq.Seed = req.Config.Seed
+		}
+		if req.Config.CandidateCount > 0 {
+			chatReq.N = req.Config.CandidateCount
+		}
+		// Logprobs support
+		if req.Config.ResponseLogprobs {
+			chatReq.Logprobs = true
+			if req.Config.Logprobs != nil {
+				chatReq.TopLogprobs = req.Config.Logprobs
+			}
 		}
 		// Map ResponseMIMEType to OpenAI response_format
 		if req.Config.ResponseMIMEType != "" {
@@ -528,6 +644,18 @@ func (m *openaiModel) generate(ctx context.Context, req *model.LLMRequest) (*mod
 				chatReq.ResponseFormat = &ResponseFormat{Type: "json_object"}
 			}
 			// "text/plain" maps to default (no response_format)
+		}
+		// ResponseSchema for structured outputs
+		if req.Config.ResponseSchema != nil {
+			schema := convertGenaiSchemaToMap(req.Config.ResponseSchema)
+			chatReq.ResponseFormat = &ResponseFormat{
+				Type: "json_schema",
+				JSONSchema: &JSONSchemaRef{
+					Name:   "response_schema",
+					Schema: schema,
+					Strict: true,
+				},
+			}
 		}
 	}
 
@@ -560,8 +688,9 @@ func (m *openaiModel) generate(ctx context.Context, req *model.LLMRequest) (*mod
 		}
 	}
 
-	// Get the response message
-	responseMsg := &chatResp.Choices[0].Message
+	// Get the response message and logprobs
+	choice := &chatResp.Choices[0]
+	responseMsg := &choice.Message
 
 	// Add response to history (even if no tools were used)
 	sessionID := extractSessionIDWithLogging(ctx, m.logger)
@@ -569,8 +698,8 @@ func (m *openaiModel) generate(ctx context.Context, req *model.LLMRequest) (*mod
 		m.addToHistory(sessionID, responseMsg)
 	}
 
-	// Convert back to genai format
-	return m.convertToLLMResponse(responseMsg, &chatResp.Usage)
+	// Convert back to genai format (including logprobs if present)
+	return m.convertToLLMResponse(responseMsg, &chatResp.Usage, choice.Logprobs)
 }
 
 
