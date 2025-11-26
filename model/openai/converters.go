@@ -387,14 +387,6 @@ func convertLogprobs(logprobs *ChoiceLogprobs) *genai.LogprobsResult {
 	return result
 }
 
-// ToolWithDeclaration is an interface for tools that have a Declaration method.
-// This allows us to extract function declaration without importing genai package.
-type ToolWithDeclaration interface {
-	Name() string
-	Description() string
-	Declaration() interface{} // Returns *genai.FunctionDeclaration but we use interface to avoid import
-}
-
 // convertTools converts ADK tools to OpenAI tool format.
 // Tools are sorted by name for deterministic order (important for testing and reproducibility).
 func (m *openaiModel) convertTools(adkTools map[string]any) []Tool {
@@ -402,7 +394,7 @@ func (m *openaiModel) convertTools(adkTools map[string]any) []Tool {
 	if m.debugLogging && m.logger != nil {
 		m.logger.Printf("[convertTools] Input: %d tools", len(adkTools))
 		for name, def := range adkTools {
-			m.logger.Printf("[convertTools] Tool '%s': type=%T", name, def)
+			m.logger.Printf("[convertTools] Tool '%s': type=%T, value=%+v", name, def, def)
 		}
 	}
 
@@ -427,47 +419,8 @@ func (m *openaiModel) convertTools(adkTools map[string]any) []Tool {
 			},
 		}
 
-		// Method 1: Check if tool has Declaration() method (ADK tools)
-		if declarer, ok := toolDef.(interface {
-			Declaration() *genai.FunctionDeclaration
-		}); ok {
-			decl := declarer.Declaration()
-			if decl != nil {
-				tool.Function.Name = decl.Name
-				tool.Function.Description = decl.Description
-
-				// Extract parameters from JSON schema
-				if decl.ParametersJsonSchema != nil {
-					if params, ok := decl.ParametersJsonSchema.(map[string]any); ok {
-						tool.Function.Parameters = params
-					} else {
-						// Try to convert to map
-						tool.Function.Parameters = convertSchemaToMap(decl.ParametersJsonSchema)
-					}
-				} else if decl.Parameters != nil {
-					// Fallback to genai.Schema if ParametersJsonSchema is not set
-					tool.Function.Parameters = convertGenaiSchemaToMap(decl.Parameters)
-				}
-
-				if m.debugLogging && m.logger != nil {
-					m.logger.Printf("[convertTools] Tool '%s' from Declaration(): desc=%q, params=%+v",
-						name, tool.Function.Description, tool.Function.Parameters)
-				}
-			}
-		} else if describer, ok := toolDef.(interface {
-			Name() string
-			Description() string
-		}); ok {
-			// Method 2: Check if tool has Name() and Description() methods
-			tool.Function.Name = describer.Name()
-			tool.Function.Description = describer.Description()
-
-			if m.debugLogging && m.logger != nil {
-				m.logger.Printf("[convertTools] Tool '%s' from Name()/Description(): desc=%q",
-					name, tool.Function.Description)
-			}
-		} else if toolMap, ok := toolDef.(map[string]any); ok {
-			// Method 3: Legacy map format
+		// Try to extract description and parameters
+		if toolMap, ok := toolDef.(map[string]any); ok {
 			if desc, ok := toolMap["description"].(string); ok {
 				tool.Function.Description = desc
 			}
@@ -477,14 +430,15 @@ func (m *openaiModel) convertTools(adkTools map[string]any) []Tool {
 				tool.Function.Parameters = params
 			}
 
+			// Debug: log extracted values
 			if m.debugLogging && m.logger != nil {
-				m.logger.Printf("[convertTools] Tool '%s' from map: desc=%q, params=%+v",
+				m.logger.Printf("[convertTools] Tool '%s' extracted: desc=%q, params=%+v",
 					name, tool.Function.Description, tool.Function.Parameters)
 			}
 		} else {
-			// Unknown format
+			// Debug: tool definition is not a map
 			if m.debugLogging && m.logger != nil {
-				m.logger.Printf("[convertTools] WARNING: Tool '%s' has unknown type=%T, using name only", name, toolDef)
+				m.logger.Printf("[convertTools] WARNING: Tool '%s' definition is not map[string]any, type=%T", name, toolDef)
 			}
 		}
 
@@ -495,33 +449,12 @@ func (m *openaiModel) convertTools(adkTools map[string]any) []Tool {
 	if m.debugLogging && m.logger != nil {
 		m.logger.Printf("[convertTools] Output: %d tools converted", len(tools))
 		for _, t := range tools {
-			m.logger.Printf("[convertTools] Final tool: name=%s, desc=%q, hasParams=%v",
-				t.Function.Name, t.Function.Description, t.Function.Parameters != nil)
+			m.logger.Printf("[convertTools] Final tool: name=%s, desc=%q, params=%v",
+				t.Function.Name, t.Function.Description, t.Function.Parameters)
 		}
 	}
 
 	return tools
-}
-
-// convertSchemaToMap converts any schema type to map[string]any
-func convertSchemaToMap(schema any) map[string]any {
-	if schema == nil {
-		return nil
-	}
-	// If it's already a map, return it
-	if m, ok := schema.(map[string]any); ok {
-		return m
-	}
-	// Try JSON encoding/decoding as fallback
-	data, err := json.Marshal(schema)
-	if err != nil {
-		return nil
-	}
-	var result map[string]any
-	if err := json.Unmarshal(data, &result); err != nil {
-		return nil
-	}
-	return result
 }
 
 // Helper functions
