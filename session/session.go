@@ -21,7 +21,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"google.golang.org/adk/model"
+	"github.com/jiatianzhao/adk-go-openai/model"
 )
 
 // Session represents a series of interactions between a user and agents.

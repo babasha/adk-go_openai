@@ -23,9 +23,9 @@ import (
 	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
+	"github.com/jiatianzhao/adk-go-openai/agent"
+	"github.com/jiatianzhao/adk-go-openai/runner"
+	"github.com/jiatianzhao/adk-go-openai/session"
 )
 
 // ExecutorConfig represents mandatory Executor dependencies.

@@ -20,8 +20,8 @@ import (
 
 	"github.com/a2aproject/a2a-go/a2asrv"
 
-	"google.golang.org/adk/internal/converters"
-	"google.golang.org/adk/session"
+	"github.com/jiatianzhao/adk-go-openai/internal/converters"
+	"github.com/jiatianzhao/adk-go-openai/session"
 )
 
 // ToA2AMetaKey adds a prefix used to differentiage ADK-related values stored in Metadata an A2A event.
