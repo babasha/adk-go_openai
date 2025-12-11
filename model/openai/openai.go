@@ -28,7 +28,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -556,7 +555,7 @@ func (m *openAIModel) generateStream(ctx context.Context, openaiReq *openAIReque
 		var usage *openAIUsage
 		var debugFile *os.File
 		var chunkID string
-		var once sync.Once
+		var bufferPrefix string
 
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -590,9 +589,6 @@ func (m *openAIModel) generateStream(ctx context.Context, openaiReq *openAIReque
 				// 追加写入 data，每次换行
 				if debugFile != nil {
 					fmt.Fprintln(debugFile, data)
-					once.Do(func() {
-						fmt.Print(debugFile, ",") // 打印个逗号不卡
-					})
 				}
 			}
 
@@ -609,6 +605,22 @@ func (m *openAIModel) generateStream(ctx context.Context, openaiReq *openAIReque
 			// Handle text content
 			if delta.Content != nil {
 				if text, ok := delta.Content.(string); ok && text != "" {
+
+					// fix: vllm 会在结束时弹出本轮会话的原始数据，基于textBuffer前缀过滤(前六位)
+					if strings.Contains(text, "<|") { // 先预防这一种，看看稳定性, 考虑拿go写一个tool_parser
+						continue
+					} else {
+						bufferText := textBuffer.String()
+						if len(bufferText) >= 6 {
+							bufferPrefix = bufferText[:6]
+						} else {
+							bufferPrefix = bufferText
+						}
+						if bufferPrefix != "" && strings.HasPrefix(strings.TrimSpace(text), strings.TrimSpace(bufferPrefix)) {
+							continue
+						}
+					}
+
 					textBuffer.WriteString(text)
 					// Yield partial response
 					llmResp := &model.LLMResponse{
