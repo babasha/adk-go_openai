@@ -26,7 +26,10 @@ import (
 	"iter"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jiatianzhao/adk-go-openai/model"
@@ -511,6 +514,21 @@ func (m *openAIModel) generate(ctx context.Context, openaiReq *openAIRequest) it
 			return
 		}
 
+		// 打印
+		var debugFile *os.File
+		debugDir := "/usr/local/bin/chats"
+		if err := os.MkdirAll(debugDir, 0755); err == nil {
+			debugFilePath := filepath.Join(debugDir, time.Now().String()+"_do.json")
+			if f, err := os.OpenFile(debugFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+				debugFile = f
+			}
+		}
+		if debugFile != nil {
+			fmt.Fprintln(debugFile, resp)
+		}
+		defer debugFile.Close()
+		// over
+
 		llmResp, err := m.convertResponse(resp)
 		if err != nil {
 			yield(nil, err)
@@ -536,6 +554,9 @@ func (m *openAIModel) generateStream(ctx context.Context, openaiReq *openAIReque
 		var textBuffer strings.Builder
 		var toolCalls []openAIToolCall
 		var usage *openAIUsage
+		var debugFile *os.File
+		var chunkID string
+		var once sync.Once
 
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -551,6 +572,28 @@ func (m *openAIModel) generateStream(ctx context.Context, openaiReq *openAIReque
 			var chunk openAIResponse
 			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 				continue
+			}
+
+			// 保存调试数据到文件
+			if chunk.ID != "" {
+				// 第一次获取到 ID 时打开文件
+				if debugFile == nil {
+					chunkID = chunk.ID + "_" + time.Now().Format("01-02 15:04")
+					debugDir := "/usr/local/bin/chats"
+					if err := os.MkdirAll(debugDir, 0755); err == nil {
+						debugFilePath := filepath.Join(debugDir, chunkID)
+						if f, err := os.OpenFile(debugFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+							debugFile = f
+						}
+					}
+				}
+				// 追加写入 data，每次换行
+				if debugFile != nil {
+					fmt.Fprintln(debugFile, data)
+					once.Do(func() {
+						fmt.Print(debugFile, ",") // 打印个逗号不卡
+					})
+				}
 			}
 
 			if len(chunk.Choices) == 0 {
@@ -608,9 +651,9 @@ func (m *openAIModel) generateStream(ctx context.Context, openaiReq *openAIReque
 			}
 
 			// Handle usage
-			if chunk.Usage != nil {
-				usage = chunk.Usage
-			}
+			//if chunk.Usage != nil {
+			//	usage = chunk.Usage
+			//}
 
 			// Handle finish
 			if choice.FinishReason != "" {
@@ -619,6 +662,7 @@ func (m *openAIModel) generateStream(ctx context.Context, openaiReq *openAIReque
 				return
 			}
 		}
+		defer debugFile.Close()
 
 		if err := scanner.Err(); err != nil {
 			yield(nil, fmt.Errorf("stream error: %w", err))
@@ -627,10 +671,10 @@ func (m *openAIModel) generateStream(ctx context.Context, openaiReq *openAIReque
 
 		// Fallback: if stream ended without FinishReason but we have accumulated content,
 		// send the final response. This handles non-compliant OpenAI-compatible APIs.
-		if textBuffer.Len() > 0 || len(toolCalls) > 0 {
-			finalResp := m.buildFinalResponse(textBuffer.String(), toolCalls, usage, "stop")
-			yield(finalResp, nil)
-		}
+		//if textBuffer.Len() > 0 || len(toolCalls) > 0 {
+		//	finalResp := m.buildFinalResponse(textBuffer.String(), toolCalls, usage, "stop")
+		//	yield(finalResp, nil)
+		//}
 	}
 }
 
@@ -778,8 +822,8 @@ func (m *openAIModel) buildFinalResponse(text string, toolCalls []openAIToolCall
 			Role:  "model",
 			Parts: parts,
 		},
-		FinishReason:  mapFinishReason(finishReason),
-		UsageMetadata: buildUsageMetadata(usage),
+		FinishReason: mapFinishReason(finishReason),
+		//UsageMetadata: buildUsageMetadata(usage),
 	}
 
 	return llmResp
@@ -913,6 +957,7 @@ func parseToolCallsFromText(text string) ([]openAIToolCall, string) {
 // Note: tool_calls and function_call map to STOP because tool calls represent
 // normal completion where the model stopped to invoke tools.
 func mapFinishReason(reason string) genai.FinishReason {
+
 	switch reason {
 	case "stop":
 		return genai.FinishReasonStop
