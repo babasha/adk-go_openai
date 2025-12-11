@@ -20,10 +20,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/glebarez/sqlite"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
 	"github.com/jiatianzhao/adk-go-openai/model"
