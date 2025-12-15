@@ -523,7 +523,7 @@ func (m *openAIModel) generate(ctx context.Context, openaiReq *openAIRequest) it
 			}
 		}
 		if debugFile != nil {
-			fmt.Fprintln(debugFile, resp)
+			fmt.Fprintf(debugFile, "%+v\n", *resp)
 		}
 		defer debugFile.Close()
 		// over
