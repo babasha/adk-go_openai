@@ -522,8 +522,14 @@ func (m *openAIModel) generate(ctx context.Context, openaiReq *openAIRequest) it
 				debugFile = f
 			}
 		}
-		if debugFile != nil {
-			fmt.Fprintf(debugFile, "%+v\n", *resp)
+		if debugFile != nil && resp != nil {
+			b, err := json.MarshalIndent(resp, "", "  ")
+			if err != nil {
+				fmt.Fprintf(debugFile, "dump error: %+v\n", err)
+			} else {
+				debugFile.Write(b)
+				debugFile.Write([]byte("\n"))
+			}
 		}
 		defer debugFile.Close()
 		// over
@@ -834,8 +840,8 @@ func (m *openAIModel) buildFinalResponse(text string, toolCalls []openAIToolCall
 			Role:  "model",
 			Parts: parts,
 		},
-		FinishReason: mapFinishReason(finishReason),
-		//UsageMetadata: buildUsageMetadata(usage),
+		FinishReason:  mapFinishReason(finishReason),
+		UsageMetadata: buildUsageMetadata(usage),
 	}
 
 	return llmResp
