@@ -26,7 +26,9 @@ import (
 	"iter"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jiatianzhao/adk-go-openai/model"
@@ -689,12 +691,38 @@ func (m *openAIModel) doRequest(ctx context.Context, openaiReq *openAIRequest) (
 	}
 	defer httpResp.Body.Close()
 
+	bodyBytes, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	// 将响应内容写入文件
+	if err := m.writeResponseToFile(bodyBytes); err != nil {
+		_ = err
+	}
+
 	var resp openAIResponse
-	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
+	if err := json.Unmarshal(bodyBytes, &resp); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
 	return &resp, nil
+}
+
+func (m *openAIModel) writeResponseToFile(bodyBytes []byte) error {
+	dir := "/usr/local/bin/pprof/data"
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	fileName := time.Now().Format("2006-01-02_15-04-05.000") + ".json"
+	filePath := filepath.Join(dir, fileName)
+
+	if err := os.WriteFile(filePath, bodyBytes, 0644); err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
+	}
+
+	return nil
 }
 
 // convertResponse converts OpenAI response to model.LLMResponse
