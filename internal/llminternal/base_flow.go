@@ -20,6 +20,7 @@ import (
 	"iter"
 	"maps"
 	"slices"
+	"sort"
 
 	"google.golang.org/genai"
 
@@ -374,11 +375,17 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 	for _, fnCall := range fnCalls {
 		curTool, ok := toolsDict[fnCall.Name]
 		if !ok {
-			return nil, fmt.Errorf("unknown tool: %q", fnCall.Name)
+			// Return error response event instead of error to allow model retry
+			ev := f.createUnknownToolErrorEvent(ctx, fnCall, toolsDict)
+			fnResponseEvents = append(fnResponseEvents, ev)
+			continue
 		}
 		funcTool, ok := curTool.(toolinternal.FunctionTool)
 		if !ok {
-			return nil, fmt.Errorf("tool %q is not a function tool", curTool.Name())
+			// Return error response event for non-function tools
+			ev := f.createToolTypeErrorEvent(ctx, fnCall, curTool.Name())
+			fnResponseEvents = append(fnResponseEvents, ev)
+			continue
 		}
 		toolCtx := toolinternal.NewToolContext(ctx, fnCall.ID, &session.EventActions{StateDelta: make(map[string]any)})
 		// toolCtx := tool.
@@ -429,6 +436,72 @@ func (f *Flow) callTool(tool toolinternal.FunctionTool, fArgs map[string]any, to
 		return map[string]any{"error": err.Error()}
 	}
 	return result
+}
+
+// createUnknownToolErrorEvent creates an error response event for unknown tool calls.
+// This allows the model to retry with the correct tool name.
+func (f *Flow) createUnknownToolErrorEvent(ctx agent.InvocationContext, fnCall *genai.FunctionCall, toolsDict map[string]tool.Tool) *session.Event {
+	availableTools := f.getAvailableToolNames(toolsDict)
+	errorMsg := fmt.Sprintf("工具 %q 不存在", fnCall.Name)
+
+	ev := session.NewEvent(ctx.InvocationID())
+	ev.LLMResponse = model.LLMResponse{
+		Content: &genai.Content{
+			Role: "user",
+			Parts: []*genai.Part{
+				{
+					FunctionResponse: &genai.FunctionResponse{
+						ID:   fnCall.ID,
+						Name: fnCall.Name,
+						Response: map[string]any{
+							"error":           errorMsg,
+							"available_tools": availableTools,
+							"suggestion":      "请从可用工具列表中选择正确的工具名称重新调用",
+						},
+					},
+				},
+			},
+		},
+	}
+	ev.Author = ctx.Agent().Name()
+	ev.Branch = ctx.Branch()
+	return ev
+}
+
+// createToolTypeErrorEvent creates an error response event for invalid tool type.
+func (f *Flow) createToolTypeErrorEvent(ctx agent.InvocationContext, fnCall *genai.FunctionCall, toolName string) *session.Event {
+	errorMsg := fmt.Sprintf("工具 %q 不是函数工具类型", toolName)
+
+	ev := session.NewEvent(ctx.InvocationID())
+	ev.LLMResponse = model.LLMResponse{
+		Content: &genai.Content{
+			Role: "user",
+			Parts: []*genai.Part{
+				{
+					FunctionResponse: &genai.FunctionResponse{
+						ID:   fnCall.ID,
+						Name: fnCall.Name,
+						Response: map[string]any{
+							"error": errorMsg,
+						},
+					},
+				},
+			},
+		},
+	}
+	ev.Author = ctx.Agent().Name()
+	ev.Branch = ctx.Branch()
+	return ev
+}
+
+// getAvailableToolNames returns a sorted list of available tool names.
+func (f *Flow) getAvailableToolNames(toolsDict map[string]tool.Tool) []string {
+	toolNames := make([]string, 0, len(toolsDict))
+	for name := range toolsDict {
+		toolNames = append(toolNames, name)
+	}
+	sort.Strings(toolNames)
+	return toolNames
 }
 
 func (f *Flow) invokeBeforeToolCallbacks(tool toolinternal.FunctionTool, fArgs map[string]any, toolCtx tool.Context) (map[string]any, error) {
