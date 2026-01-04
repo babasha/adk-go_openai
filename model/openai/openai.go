@@ -536,6 +536,7 @@ func (m *openAIModel) generateStream(ctx context.Context, openaiReq *openAIReque
 
 		scanner := bufio.NewScanner(httpResp.Body)
 		var textBuffer strings.Builder
+		var reasoningBuffer strings.Builder
 		var toolCalls []openAIToolCall
 		var usage *openAIUsage
 		var bufferPrefix string // vllm:12版本响应了原始内容，需要过滤
@@ -563,6 +564,26 @@ func (m *openAIModel) generateStream(ctx context.Context, openaiReq *openAIReque
 			delta := choice.Delta
 			if delta == nil {
 				continue
+			}
+
+			// Handle reasoning content
+			if delta.ReasoningContent != nil {
+				if text, ok := delta.ReasoningContent.(string); ok && text != "" {
+					reasoningBuffer.WriteString(text)
+					// Yield partial response with Thought: true
+					llmResp := &model.LLMResponse{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{
+								{Text: text, Thought: true},
+							},
+						},
+						Partial: true,
+					}
+					if !yield(llmResp, nil) {
+						return
+					}
+				}
 			}
 
 			// Handle text content
@@ -632,7 +653,7 @@ func (m *openAIModel) generateStream(ctx context.Context, openaiReq *openAIReque
 
 			// Handle finish
 			if choice.FinishReason != "" {
-				finalResp := m.buildFinalResponse(textBuffer.String(), toolCalls, usage, choice.FinishReason)
+				finalResp := m.buildFinalResponse(textBuffer.String(), reasoningBuffer.String(), toolCalls, usage, choice.FinishReason)
 				yield(finalResp, nil)
 				return
 			}
@@ -645,8 +666,8 @@ func (m *openAIModel) generateStream(ctx context.Context, openaiReq *openAIReque
 
 		// Fallback: if stream ended without FinishReason but we have accumulated content,
 		// send the final response. This handles non-compliant OpenAI-compatible APIs.
-		//if textBuffer.Len() > 0 || len(toolCalls) > 0 {
-		//	finalResp := m.buildFinalResponse(textBuffer.String(), toolCalls, usage, "stop")
+		//if textBuffer.Len() > 0 || len(toolCalls) > 0 || reasoningBuffer.Len() > 0 {
+		//	finalResp := m.buildFinalResponse(textBuffer.String(), reasoningBuffer.String(), toolCalls, usage, "stop")
 		//	yield(finalResp, nil)
 		//}
 	}
@@ -797,8 +818,15 @@ func (m *openAIModel) convertResponse(resp *openAIResponse) (*model.LLMResponse,
 	return llmResp, nil
 }
 
-func (m *openAIModel) buildFinalResponse(text string, toolCalls []openAIToolCall, usage *openAIUsage, finishReason string) *model.LLMResponse {
+func (m *openAIModel) buildFinalResponse(text string, reasoningText string, toolCalls []openAIToolCall, usage *openAIUsage, finishReason string) *model.LLMResponse {
 	var parts []*genai.Part
+
+	// Handle reasoning content - prepend before regular content
+	if reasoningText != "" {
+		if reasoningParts := extractReasoningParts(reasoningText); len(reasoningParts) > 0 {
+			parts = append(parts, reasoningParts...)
+		}
+	}
 
 	if text != "" {
 		parts = append(parts, genai.NewPartFromText(text))
