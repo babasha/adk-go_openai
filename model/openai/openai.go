@@ -98,6 +98,16 @@ func NewModel(ctx context.Context, modelName string, config *ClientConfig) (mode
 	}, nil
 }
 
+// 返回是否开启调试落盘
+func isDebugFileEnabled() bool {
+	v := os.Getenv("OPENAI_DEBUG_LOG")
+	if v == "" {
+		return false
+	}
+	vLower := strings.ToLower(v)
+	return vLower == "1" || vLower == "true" || vLower == "yes" || vLower == "on"
+}
+
 // Name returns the model name.
 func (m *openAIModel) Name() string {
 	return m.modelName
@@ -539,6 +549,12 @@ func (m *openAIModel) generateStream(ctx context.Context, openaiReq *openAIReque
 		var reasoningBuffer strings.Builder
 		var toolCalls []openAIToolCall
 		var usage *openAIUsage
+
+		// 日志
+		var debugFile *os.File
+		var chunkID string
+
+		// fallback
 		var bufferPrefix string // vllm:12版本响应了原始内容，需要过滤
 
 		for scanner.Scan() {
@@ -556,6 +572,27 @@ func (m *openAIModel) generateStream(ctx context.Context, openaiReq *openAIReque
 			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 				continue
 			}
+
+			// 日志
+			if isDebugFileEnabled() && chunk.ID != "" {
+				// 第一次获取到 ID 时打开文件
+				if debugFile == nil {
+					chunkID = chunk.ID + "_" + time.Now().Format("01-02 15:04")
+					debugDir := "/usr/local/bin/chats"
+					if err := os.MkdirAll(debugDir, 0755); err == nil {
+						debugFilePath := filepath.Join(debugDir, chunkID)
+						if f, err := os.OpenFile(debugFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+							debugFile = f
+						}
+					}
+				}
+				// 追加写入 data，每次换行
+				if debugFile != nil {
+					fmt.Fprintln(debugFile, data)
+				}
+			}
+			// 日志over
+
 			if len(chunk.Choices) == 0 {
 				continue
 			}
@@ -731,6 +768,10 @@ func (m *openAIModel) doRequest(ctx context.Context, openaiReq *openAIRequest) (
 }
 
 func (m *openAIModel) writeResponseToFile(bodyBytes []byte) error {
+	if !isDebugFileEnabled() {
+		return nil
+	}
+
 	dir := "/usr/local/bin/pprof/data"
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
