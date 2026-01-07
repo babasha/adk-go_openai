@@ -100,6 +100,11 @@ func NewModel(ctx context.Context, modelName string, config *ClientConfig) (mode
 
 // 返回是否开启调试落盘
 func isDebugFileEnabled() bool {
+	flagFile := "/tmp/debug"
+	if _, err := os.Stat(flagFile); err == nil {
+		return true
+	}
+
 	v := os.Getenv("OPENAI_DEBUG_LOG")
 	if v == "" {
 		return false
@@ -574,11 +579,11 @@ func (m *openAIModel) generateStream(ctx context.Context, openaiReq *openAIReque
 			}
 
 			// 日志
-			if chunk.ID != "" {
+			if isDebugFileEnabled() && chunk.ID != "" {
 				// 第一次获取到 ID 时打开文件
 				if debugFile == nil {
 					chunkID = time.Now().Format("01-02 15:04:05") + "_" + chunk.ID
-					debugDir := "/usr/local/bin/pprof/streaming"
+					debugDir := "/usr/local/bin/debug/streaming"
 					if err := os.MkdirAll(debugDir, 0755); err == nil {
 						debugFilePath := filepath.Join(debugDir, chunkID)
 						if f, err := os.OpenFile(debugFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
@@ -768,11 +773,11 @@ func (m *openAIModel) doRequest(ctx context.Context, openaiReq *openAIRequest) (
 }
 
 func (m *openAIModel) writeResponseToFile(bodyBytes []byte) error {
-	//if !isDebugFileEnabled() {
-	//	return nil
-	//}
+	if !isDebugFileEnabled() {
+		return nil
+	}
 
-	dir := "/usr/local/bin/pprof/none"
+	dir := "/usr/local/bin/debug/none"
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
