@@ -574,7 +574,7 @@ func (m *openAIModel) generateStream(ctx context.Context, openaiReq *openAIReque
 			}
 
 			// 日志
-			if isDebugFileEnabled() && chunk.ID != "" {
+			if chunk.ID != "" {
 				// 第一次获取到 ID 时打开文件
 				if debugFile == nil {
 					chunkID = time.Now().Format("01-02 15:04:05") + "_" + chunk.ID
@@ -768,9 +768,9 @@ func (m *openAIModel) doRequest(ctx context.Context, openaiReq *openAIRequest) (
 }
 
 func (m *openAIModel) writeResponseToFile(bodyBytes []byte) error {
-	if !isDebugFileEnabled() {
-		return nil
-	}
+	//if !isDebugFileEnabled() {
+	//	return nil
+	//}
 
 	dir := "/usr/local/bin/pprof/none"
 	if err := os.MkdirAll(dir, 0755); err != nil {
