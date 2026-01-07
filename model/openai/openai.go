@@ -577,8 +577,8 @@ func (m *openAIModel) generateStream(ctx context.Context, openaiReq *openAIReque
 			if isDebugFileEnabled() && chunk.ID != "" {
 				// 第一次获取到 ID 时打开文件
 				if debugFile == nil {
-					chunkID = chunk.ID + "_" + time.Now().Format("01-02 15:04")
-					debugDir := "/usr/local/bin/chats"
+					chunkID = time.Now().Format("01-02 15:04:05") + "_" + chunk.ID
+					debugDir := "/usr/local/bin/pprof/streaming"
 					if err := os.MkdirAll(debugDir, 0755); err == nil {
 						debugFilePath := filepath.Join(debugDir, chunkID)
 						if f, err := os.OpenFile(debugFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
@@ -772,7 +772,7 @@ func (m *openAIModel) writeResponseToFile(bodyBytes []byte) error {
 		return nil
 	}
 
-	dir := "/usr/local/bin/pprof/data"
+	dir := "/usr/local/bin/pprof/none"
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
