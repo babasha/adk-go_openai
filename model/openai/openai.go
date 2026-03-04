@@ -36,7 +36,7 @@
 //   - Works with any OpenAI-compatible endpoint (just set BaseURL)
 //   - API key is optional (for local servers like Ollama/LM Studio)
 //   - Only sends standard headers (no cloud-specific headers)
-//   - Tested with: OpenAI API, LM Studio, Google Gemma 3
+//   - Tested with: OpenAI API, LM Studio, Qwen 3.5, Google Gemma 3
 package openai
 
 import (
@@ -61,11 +61,12 @@ const (
 
 // OpenAIMessage represents a message in OpenAI chat format.
 type OpenAIMessage struct {
-	Role       string      `json:"role"`
-	Content    interface{} `json:"content,omitempty"`
-	Name       string      `json:"name,omitempty"`
-	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
-	ToolCallID string      `json:"tool_call_id,omitempty"`
+	Role             string      `json:"role"`
+	Content          interface{} `json:"content,omitempty"`
+	ReasoningContent string      `json:"reasoning_content,omitempty"` // Thinking content from reasoning models (Qwen, DeepSeek, etc.)
+	Name             string      `json:"name,omitempty"`
+	ToolCalls        []ToolCall  `json:"tool_calls,omitempty"`
+	ToolCallID       string      `json:"tool_call_id,omitempty"`
 }
 
 // ToolCall represents an OpenAI tool call.
@@ -344,7 +345,7 @@ type openaiModel struct {
 
 // NewModel creates a new OpenAI-compatible model adapter.
 //
-// modelName specifies which model to use (e.g., "gpt-4", "gemma-3-12b-it").
+// modelName specifies which model to use (e.g., "gpt-4", "Qwen/Qwen3.5-4B", "gemma-3-12b-it").
 // cfg provides the configuration including API endpoint and authentication.
 func NewModel(modelName string, cfg *Config) (model.LLM, error) {
 	if cfg == nil {

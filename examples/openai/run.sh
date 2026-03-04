@@ -6,7 +6,7 @@ set -e
 
 # Default configuration
 OPENAI_BASE_URL=${OPENAI_BASE_URL:-http://127.0.0.1:1234/v1}
-OPENAI_MODEL=${OPENAI_MODEL:-google/gemma-3-12b}
+OPENAI_MODEL=${OPENAI_MODEL:-Qwen/Qwen3.5-4B}
 
 echo "🚀 Starting Weather Agent with OpenAI Adapter"
 echo "📡 Endpoint: $OPENAI_BASE_URL"

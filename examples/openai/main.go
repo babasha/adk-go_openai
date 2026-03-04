@@ -80,7 +80,7 @@ func main() {
 
 	modelName := os.Getenv("OPENAI_MODEL")
 	if modelName == "" {
-		modelName = "google/gemma-3-12b" // Default model with tool support
+		modelName = "Qwen/Qwen3.5-4B" // Default model with tool support
 	}
 
 	apiKey := os.Getenv("OPENAI_API_KEY") // Optional, for OpenAI API

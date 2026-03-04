@@ -254,7 +254,11 @@ func (m *openaiModel) createFinalResponse(text string, toolCalls []ToolCall) *mo
 	parts := make([]*genai.Part, 0)
 
 	if text != "" {
-		parts = append(parts, genai.NewPartFromText(text))
+		// Strip <think>...</think> blocks from reasoning models (Qwen 3.5, DeepSeek, etc.)
+		text = stripThinkingBlocks(text)
+		if text != "" {
+			parts = append(parts, genai.NewPartFromText(text))
+		}
 	}
 
 	// Convert tool calls to function calls

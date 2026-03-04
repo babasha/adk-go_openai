@@ -20,12 +20,28 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
+
+// thinkBlockRe matches <think>...</think> blocks produced by reasoning models
+// (Qwen 3.5, DeepSeek R1, etc.) including optional trailing whitespace.
+var thinkBlockRe = regexp.MustCompile(`(?s)<think>.*?</think>\s*`)
+
+// stripThinkingBlocks removes <think>...</think> blocks from text.
+// These blocks are produced by reasoning models like Qwen 3.5 and DeepSeek R1
+// and contain internal chain-of-thought that is typically not useful for
+// downstream processing.
+func stripThinkingBlocks(text string) string {
+	if !strings.Contains(text, "<think>") {
+		return text
+	}
+	return strings.TrimSpace(thinkBlockRe.ReplaceAllString(text, ""))
+}
 
 // convertToOpenAIMessages converts genai.Content to OpenAI message format.
 // The function is stateless — the ADK framework passes full conversation history
@@ -265,7 +281,11 @@ func (m *openaiModel) convertToLLMResponse(msg *OpenAIMessage, usage *Usage, log
 	// Handle text content
 	if msg.Content != nil {
 		if text, ok := msg.Content.(string); ok && text != "" {
-			parts = append(parts, genai.NewPartFromText(text))
+			// Strip <think>...</think> blocks from reasoning models (Qwen 3.5, DeepSeek, etc.)
+			text = stripThinkingBlocks(text)
+			if text != "" {
+				parts = append(parts, genai.NewPartFromText(text))
+			}
 		}
 	}
 
