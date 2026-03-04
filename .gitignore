@@ -21,6 +21,9 @@ profile.cov
 go.work
 go.work.sum
 
+# Environment files (may contain HF tokens)
+.env
+
 # Example binaries and logs
 examples/openai/weather_agent
 examples/openai/*.log

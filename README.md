@@ -45,11 +45,11 @@ This Go version of ADK is ideal for developers building cloud-native agent appli
 
 ### 🚀 Quick Start
 
-**1. Setup Local LLM** (LM Studio recommended)
+**1. Start vLLM with Docker** (recommended — supports MTP speculative decoding)
 ```bash
-# Download LM Studio from https://lmstudio.ai/
-# Load google/gemma-3-12b model
-# Start local server on port 1234
+docker compose up -d
+# First run downloads ~3GB model; subsequent starts use cached weights.
+# Wait for health check: curl http://localhost:8000/health
 ```
 
 **2. Run Example**
@@ -65,14 +65,26 @@ go build -o weather_agent main.go
 Agent: The weather in London is sunny with a temperature of 22°C...
 ```
 
+<details>
+<summary>Alternative: LM Studio / Ollama</summary>
+
+```bash
+# LM Studio (port 1234):
+export OPENAI_BASE_URL=http://localhost:1234/v1
+
+# Ollama (port 11434):
+export OPENAI_BASE_URL=http://localhost:11434/v1
+```
+</details>
+
 ### 📦 Usage
 
 ```go
 import "google.golang.org/adk/model/openai"
 
 // Create OpenAI model adapter
-model, err := openai.NewModel("google/gemma-3-12b", &openai.Config{
-    BaseURL: "http://localhost:1234/v1",
+model, err := openai.NewModel("Qwen/Qwen3.5-4B", &openai.Config{
+    BaseURL: "http://localhost:8000/v1",
 })
 if err != nil {
     // Handle error
@@ -103,11 +115,12 @@ model/openai/
 
 ### 🤖 Supported Models
 
-| Model | Provider | Tool Calling | Status |
-|-------|----------|--------------|--------|
-| Gemma 3 (12B, 4B) | Google | ✅ Full | ✅ Recommended |
-| GPT-4 | OpenAI | ✅ Full | ✅ Recommended |
-| Mistral 7B | Mistral | ⚠️ Limited | ✅ Works |
+| Model | Provider | Tool Calling | Status | Notes |
+|-------|----------|--------------|--------|-------|
+| Qwen3.5 (4B, 8B) | Alibaba | ✅ Full | ✅ Recommended | MTP speculative decoding via vLLM |
+| Gemma 3 (12B, 4B) | Google | ✅ Full | ✅ Works | |
+| GPT-4 | OpenAI | ✅ Full | ✅ Works | |
+| Mistral 7B | Mistral | ⚠️ Limited | ✅ Works | |
 
 ---
 

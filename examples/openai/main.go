@@ -57,25 +57,25 @@ func main() {
 	ctx := context.Background()
 
 	// Configuration for different providers:
-	// 1. LM Studio (default):
+	// 1. vLLM via Docker (default): docker compose up -d
+	//    BaseURL: "http://localhost:8000/v1"
+	//    APIKey: "" (not needed)
+	//
+	// 2. LM Studio:
 	//    BaseURL: "http://localhost:1234/v1"
 	//    APIKey: "" (not needed)
 	//
-	// 2. Ollama:
+	// 3. Ollama:
 	//    BaseURL: "http://localhost:11434/v1"
 	//    APIKey: "" (not needed)
 	//
-	// 3. OpenAI:
+	// 4. OpenAI:
 	//    BaseURL: "https://api.openai.com/v1"
 	//    APIKey: os.Getenv("OPENAI_API_KEY")
-	//
-	// 4. Remote LM Studio via ngrok:
-	//    BaseURL: "https://your-ngrok-url.ngrok.io/v1"
-	//    APIKey: "" (not needed)
 
 	baseURL := os.Getenv("OPENAI_BASE_URL")
 	if baseURL == "" {
-		baseURL = "http://localhost:1234/v1" // Default to LM Studio
+		baseURL = "http://localhost:8000/v1" // Default to vLLM (docker compose up)
 	}
 
 	modelName := os.Getenv("OPENAI_MODEL")
