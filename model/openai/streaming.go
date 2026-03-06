@@ -109,6 +109,10 @@ func (m *openaiModel) processSSEStream(reader io.Reader, yield func(*model.LLMRe
 	var lastChunk *StreamChunk
 	var finalSent bool // Track if we've already sent the final response
 
+	// Think-block tracking for reasoning models (Qwen 3.5, QwQ).
+	// Suppress partial yields while model is inside <think>...</think>.
+	var inThinkBlock bool
+
 	for scanner.Scan() {
 		line := scanner.Text()
 
@@ -150,20 +154,33 @@ func (m *openaiModel) processSSEStream(reader io.Reader, yield func(*model.LLMRe
 		// Aggregate text content
 		if choice.Delta.Content != nil {
 			if text, ok := choice.Delta.Content.(string); ok && text != "" {
+				// Track <think> blocks from reasoning models (Qwen 3.5, QwQ).
+				// Suppress partial yields while inside a think block so the user
+				// doesn't see raw chain-of-thought streaming output.
+				wasInThinkBlock := inThinkBlock
+
 				aggregatedText.WriteString(text)
 
-				// Yield partial response
-				partialResp := &model.LLMResponse{
-					Content: &genai.Content{
-						Role:  "model",
-						Parts: []*genai.Part{genai.NewPartFromText(text)},
-					},
-					Partial:      true,
-					TurnComplete: false,
-				}
+				full := aggregatedText.String()
+				openCount := strings.Count(full, "<think>")
+				closeCount := strings.Count(full, "</think>")
+				inThinkBlock = openCount > closeCount
 
-				if !yield(partialResp, nil) {
-					return nil
+				// Only yield partial if we were outside think block before AND still outside.
+				// This also suppresses the chunk that contains </think> itself.
+				if !wasInThinkBlock && !inThinkBlock {
+					partialResp := &model.LLMResponse{
+						Content: &genai.Content{
+							Role:  "model",
+							Parts: []*genai.Part{genai.NewPartFromText(text)},
+						},
+						Partial:      true,
+						TurnComplete: false,
+					}
+
+					if !yield(partialResp, nil) {
+						return nil
+					}
 				}
 			}
 		}
@@ -253,9 +270,12 @@ func (m *openaiModel) mergeToolCall(existing []ToolCall, delta ToolCall) []ToolC
 func (m *openaiModel) createFinalResponse(text string, toolCalls []ToolCall) *model.LLMResponse {
 	parts := make([]*genai.Part, 0)
 
+	// Post-process text:
+	// 1. Strip <think> tags from reasoning models (Qwen 3.5, QwQ)
+	// 2. Strip markdown code fences from JSON output
 	if text != "" {
-		// Strip <think>...</think> blocks from reasoning models (Qwen 3.5, DeepSeek, etc.)
 		text = stripThinkingBlocks(text)
+		text = stripMarkdownCodeFence(text)
 		if text != "" {
 			parts = append(parts, genai.NewPartFromText(text))
 		}

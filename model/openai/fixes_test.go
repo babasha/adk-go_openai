@@ -344,3 +344,230 @@ func TestMessageSequenceValidation(t *testing.T) {
 
 	t.Log("✓ Message sequence validation test PASSED")
 }
+
+// TestStreamingThinkBlockSuppression tests that <think> blocks from reasoning models
+// (Qwen 3.5) are suppressed in partial streaming output but correctly stripped in final response.
+func TestStreamingThinkBlockSuppression(t *testing.T) {
+	// Build SSE stream simulating Qwen 3.5 output with <think> block
+	chunks := []string{
+		// Think block chunks (should be suppressed in partials)
+		makeSSEChunk("", "<think>"),
+		makeSSEChunk("", "\nLet me analyze this step by step.\n"),
+		makeSSEChunk("", "</think>"),
+		makeSSEChunk("", "\n\n"),
+		// Actual answer chunks (should be yielded as partials)
+		makeSSEChunk("", "The answer"),
+		makeSSEChunk("", " is 42."),
+		makeSSEDone(),
+	}
+
+	sseData := buildSSEStream(chunks)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(sseData))
+	}))
+	defer server.Close()
+
+	m, err := NewModel("qwen3.5-9b", &Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("Failed to create model: %v", err)
+	}
+
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			genai.NewContentFromText("What is the answer?", "user"),
+		},
+		Config: &genai.GenerateContentConfig{},
+	}
+
+	var partials []string
+	var finalText string
+
+	for resp, err := range m.GenerateContent(context.Background(), req, true) {
+		if err != nil {
+			t.Fatalf("Stream error: %v", err)
+		}
+
+		if resp.Partial {
+			for _, part := range resp.Content.Parts {
+				if part.Text != "" {
+					partials = append(partials, part.Text)
+				}
+			}
+		} else if resp.TurnComplete {
+			for _, part := range resp.Content.Parts {
+				if part.Text != "" {
+					finalText += part.Text
+				}
+			}
+		}
+	}
+
+	// Verify: partial outputs should NOT contain think content
+	for _, p := range partials {
+		if contains := containsThinkContent(p); contains {
+			t.Errorf("Partial response should not contain think content, got %q", p)
+		}
+	}
+
+	// Verify: final response should be clean
+	if finalText != "The answer is 42." {
+		t.Errorf("Final text should be clean, got %q", finalText)
+	}
+
+	t.Logf("Partials yielded: %v", partials)
+	t.Log("✓ Streaming think block suppression test PASSED")
+}
+
+// TestStreamingThinkBlockWithToolCalls tests that think blocks work correctly
+// alongside tool calls in streaming mode.
+func TestStreamingThinkBlockWithToolCalls(t *testing.T) {
+	chunks := []string{
+		// Think block
+		makeSSEChunk("", "<think>"),
+		makeSSEChunk("", "\nI need to call a tool.\n"),
+		makeSSEChunk("", "</think>"),
+		makeSSEChunk("", "\n\n"),
+		// Tool call (finish_reason = tool_calls)
+		makeSSEToolCallChunk(0, "call_123", "function", "get_weather", `{"location":"Paris"}`),
+		makeSSEFinish("tool_calls"),
+	}
+
+	sseData := buildSSEStream(chunks)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(sseData))
+	}))
+	defer server.Close()
+
+	m, err := NewModel("qwen3.5-9b", &Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("Failed to create model: %v", err)
+	}
+
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			genai.NewContentFromText("What's the weather?", "user"),
+		},
+		Config: &genai.GenerateContentConfig{},
+	}
+
+	var finalResp *model.LLMResponse
+	for resp, err := range m.GenerateContent(context.Background(), req, true) {
+		if err != nil {
+			t.Fatalf("Stream error: %v", err)
+		}
+		if resp.TurnComplete {
+			finalResp = resp
+		}
+	}
+
+	if finalResp == nil {
+		t.Fatal("No final response received")
+	}
+
+	// Should have a function call part, and text should be clean (no think tags)
+	hasFuncCall := false
+	for _, part := range finalResp.Content.Parts {
+		if part.FunctionCall != nil {
+			hasFuncCall = true
+			if part.FunctionCall.Name != "get_weather" {
+				t.Errorf("Expected get_weather, got %s", part.FunctionCall.Name)
+			}
+		}
+		if part.Text != "" && containsThinkContent(part.Text) {
+			t.Errorf("Final text should not contain think tags, got %q", part.Text)
+		}
+	}
+
+	if !hasFuncCall {
+		t.Error("Expected a function call in the response")
+	}
+
+	t.Log("✓ Streaming think block + tool calls test PASSED")
+}
+
+func containsThinkContent(s string) bool {
+	return len(s) > 0 && (contains(s, "<think>") || contains(s, "</think>"))
+}
+
+func contains(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
+
+// SSE test helpers
+
+func makeSSEChunk(id, content string) string {
+	chunk := StreamChunk{
+		ID:    "chatcmpl-test",
+		Model: "qwen3.5-9b",
+		Choices: []Choice{{
+			Index: 0,
+			Delta: OpenAIMessage{
+				Role:    "assistant",
+				Content: content,
+			},
+		}},
+	}
+	data, _ := json.Marshal(chunk)
+	return "data: " + string(data)
+}
+
+func makeSSEToolCallChunk(index int, id, typ, name, args string) string {
+	chunk := StreamChunk{
+		ID:    "chatcmpl-test",
+		Model: "qwen3.5-9b",
+		Choices: []Choice{{
+			Index: 0,
+			Delta: OpenAIMessage{
+				Role: "assistant",
+				ToolCalls: []ToolCall{{
+					Index: index,
+					ID:    id,
+					Type:  typ,
+					Function: FunctionCall{
+						Name:      name,
+						Arguments: args,
+					},
+				}},
+			},
+		}},
+	}
+	data, _ := json.Marshal(chunk)
+	return "data: " + string(data)
+}
+
+func makeSSEFinish(reason string) string {
+	chunk := StreamChunk{
+		ID:    "chatcmpl-test",
+		Model: "qwen3.5-9b",
+		Choices: []Choice{{
+			Index:        0,
+			Delta:        OpenAIMessage{Role: "assistant"},
+			FinishReason: reason,
+		}},
+	}
+	data, _ := json.Marshal(chunk)
+	return "data: " + string(data)
+}
+
+func makeSSEDone() string {
+	return "data: [DONE]"
+}
+
+func buildSSEStream(chunks []string) string {
+	result := ""
+	for _, chunk := range chunks {
+		result += chunk + "\n\n"
+	}
+	return result
+}

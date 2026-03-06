@@ -28,20 +28,44 @@ import (
 	"google.golang.org/genai"
 )
 
-// thinkBlockRe matches <think>...</think> blocks produced by reasoning models
-// (Qwen 3.5, DeepSeek R1, etc.) including optional trailing whitespace.
-var thinkBlockRe = regexp.MustCompile(`(?s)<think>.*?</think>\s*`)
+// thinkTagRegex matches <think>...</think> blocks (including multiline) produced by
+// reasoning models like Qwen 3.5, DeepSeek R1, QwQ. These blocks contain internal
+// chain-of-thought and should be stripped before returning the response.
+var thinkTagRegex = regexp.MustCompile(`(?s)<think>.*?</think>\s*`)
 
-// stripThinkingBlocks removes <think>...</think> blocks from text.
-// These blocks are produced by reasoning models like Qwen 3.5 and DeepSeek R1
-// and contain internal chain-of-thought that is typically not useful for
-// downstream processing.
+// unclosedThinkTagRegex matches an unclosed <think> block (model was truncated by max_tokens).
+var unclosedThinkTagRegex = regexp.MustCompile(`(?s)<think>.*$`)
+
+// orphanedCloseThinkRegex matches a </think> tag without a preceding <think>.
+// This happens when reasoning spans across tool-call turns: the opening <think>
+// was in the assistant tool-call message (stripped from history) and the model
+// continues with </think> at the start of its next response.
+var orphanedCloseThinkRegex = regexp.MustCompile(`^\s*</think>\s*`)
+
+// markdownCodeFenceRegex extracts content from ```json ... ``` or ``` ... ``` blocks.
+// Local LLMs (Qwen, Gemma, etc.) often wrap JSON in markdown fences when json_object
+// response_format is not enforced.
+var markdownCodeFenceRegex = regexp.MustCompile("(?s)^\\s*```(?:json)?\\s*\n?(.*?)\\s*```\\s*$")
+
+// stripThinkingBlocks removes <think>...</think> blocks from reasoning model output.
+// Handles: closed blocks, unclosed blocks (truncated), and orphaned </think> tags.
 func stripThinkingBlocks(text string) string {
-	if !strings.Contains(text, "<think>") {
-		return text
+	// Strip orphaned </think> at start (reasoning spanned across tool-call turn)
+	if strings.HasPrefix(strings.TrimSpace(text), "</think>") {
+		text = orphanedCloseThinkRegex.ReplaceAllString(text, "")
 	}
-	return strings.TrimSpace(thinkBlockRe.ReplaceAllString(text, ""))
+	if !strings.Contains(text, "<think>") {
+		return strings.TrimSpace(text)
+	}
+	// First strip closed <think>...</think> blocks
+	result := thinkTagRegex.ReplaceAllString(text, "")
+	// Then strip any remaining unclosed <think> block (truncated output)
+	result = unclosedThinkTagRegex.ReplaceAllString(result, "")
+	return strings.TrimSpace(result)
 }
+
+// stripThinkTags is an alias for stripThinkingBlocks for backwards compatibility.
+var stripThinkTags = stripThinkingBlocks
 
 // convertToOpenAIMessages converts genai.Content to OpenAI message format.
 // The function is stateless — the ADK framework passes full conversation history
@@ -128,10 +152,19 @@ func (m *openaiModel) convertContent(content *genai.Content) ([]*OpenAIMessage, 
 	for _, part := range content.Parts {
 		switch {
 		case part.Text != "":
+			text := part.Text
+			// Strip <think> tags from historical assistant messages.
+			// Qwen 3.5 docs: "historical model outputs should exclude thinking content"
+			if role == "assistant" {
+				text = stripThinkTags(text)
+				if text == "" {
+					continue
+				}
+			}
 			// Add as text content part
 			contentParts = append(contentParts, ContentPartText{
 				Type: "text",
-				Text: part.Text,
+				Text: text,
 			})
 
 		case part.FunctionCall != nil:
@@ -274,15 +307,31 @@ func (m *openaiModel) convertContent(content *genai.Content) ([]*OpenAIMessage, 
 	return messages, nil
 }
 
+// stripMarkdownCodeFence extracts content from ```json ... ``` blocks.
+// Local LLMs without response_format enforcement often wrap JSON in code fences.
+func stripMarkdownCodeFence(text string) string {
+	if !strings.Contains(text, "```") {
+		return text
+	}
+	if matches := markdownCodeFenceRegex.FindStringSubmatch(text); len(matches) > 1 {
+		return strings.TrimSpace(matches[1])
+	}
+	return text
+}
+
+
+
 // convertToLLMResponse converts an OpenAI message back to genai format.
 func (m *openaiModel) convertToLLMResponse(msg *OpenAIMessage, usage *Usage, logprobs *ChoiceLogprobs) (*model.LLMResponse, error) {
 	parts := make([]*genai.Part, 0)
 
-	// Handle text content
+	// Handle text content:
+	// 1. Strip <think> tags from reasoning models (Qwen 3.5, QwQ)
+	// 2. Strip markdown code fences that local LLMs add around JSON output
 	if msg.Content != nil {
 		if text, ok := msg.Content.(string); ok && text != "" {
-			// Strip <think>...</think> blocks from reasoning models (Qwen 3.5, DeepSeek, etc.)
 			text = stripThinkingBlocks(text)
+			text = stripMarkdownCodeFence(text)
 			if text != "" {
 				parts = append(parts, genai.NewPartFromText(text))
 			}

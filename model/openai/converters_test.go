@@ -90,6 +90,157 @@ func TestMessageConversionRoundtrip(t *testing.T) {
 	}
 }
 
+// TestStripThinkTags tests removal of <think> blocks from reasoning model output (Qwen 3.5, QwQ).
+func TestStripThinkTags(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "no think tags",
+			input:    "Hello world",
+			expected: "Hello world",
+		},
+		{
+			name:     "simple think block",
+			input:    "<think>\nLet me reason about this...\n</think>\n\nThe answer is 42.",
+			expected: "The answer is 42.",
+		},
+		{
+			name:     "think block with multiline reasoning",
+			input:    "<think>\nStep 1: analyze\nStep 2: compute\nStep 3: verify\n</think>\n\nResult: correct.",
+			expected: "Result: correct.",
+		},
+		{
+			name:     "unclosed think block (truncated output)",
+			input:    "<think>\nI'm still thinking about this and the output was cut off by max_tok",
+			expected: "",
+		},
+		{
+			name:     "text before think block",
+			input:    "Sure! <think>\nreasoning here\n</think>\n\nHere is my answer.",
+			expected: "Sure! Here is my answer.",
+		},
+		{
+			name:     "only think block, no answer",
+			input:    "<think>\njust reasoning\n</think>",
+			expected: "",
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			expected: "",
+		},
+		{
+			name:     "think keyword but not a tag",
+			input:    "I think this is correct",
+			expected: "I think this is correct",
+		},
+		{
+			name:     "orphaned close tag after tool call",
+			input:    "</think>\n\nHere is the answer based on tool results.",
+			expected: "Here is the answer based on tool results.",
+		},
+		{
+			name:     "orphaned close tag with leading whitespace",
+			input:    "  </think>  \n\nAnswer",
+			expected: "Answer",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := stripThinkTags(tt.input)
+			if result != tt.expected {
+				t.Errorf("stripThinkTags(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestConvertToLLMResponse_StripsThinkTags verifies that <think> tags are stripped from
+// sync (non-streaming) model responses.
+func TestConvertToLLMResponse_StripsThinkTags(t *testing.T) {
+	m := &openaiModel{name: "qwen3.5-9b"}
+
+	msg := &OpenAIMessage{
+		Role:    "assistant",
+		Content: "<think>\nLet me analyze this.\n</think>\n\nThe capital of France is Paris.",
+	}
+
+	resp, err := m.convertToLLMResponse(msg, nil, nil)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	if len(resp.Content.Parts) != 1 {
+		t.Fatalf("Expected 1 part, got %d", len(resp.Content.Parts))
+	}
+
+	text := resp.Content.Parts[0].Text
+	if text != "The capital of France is Paris." {
+		t.Errorf("Expected clean text, got %q", text)
+	}
+}
+
+// TestConvertContent_StripsThinkFromHistory verifies that <think> tags are stripped
+// from historical assistant messages (Qwen 3.5 requirement).
+func TestConvertContent_StripsThinkFromHistory(t *testing.T) {
+	m := &openaiModel{name: "qwen3.5-9b"}
+
+	content := &genai.Content{
+		Role: "model",
+		Parts: []*genai.Part{
+			genai.NewPartFromText("<think>\nSome reasoning\n</think>\n\nClean answer here."),
+		},
+	}
+
+	msgs, err := m.convertContent(content)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	if len(msgs) != 1 {
+		t.Fatalf("Expected 1 message, got %d", len(msgs))
+	}
+
+	text, ok := msgs[0].Content.(string)
+	if !ok {
+		t.Fatalf("Expected string content, got %T", msgs[0].Content)
+	}
+
+	if text != "Clean answer here." {
+		t.Errorf("Expected think tags stripped from history, got %q", text)
+	}
+}
+
+// TestConvertContent_UserMessageUnchanged verifies that user messages are NOT stripped.
+func TestConvertContent_UserMessageUnchanged(t *testing.T) {
+	m := &openaiModel{name: "qwen3.5-9b"}
+
+	content := &genai.Content{
+		Role: "user",
+		Parts: []*genai.Part{
+			genai.NewPartFromText("Can you <think> about this?"),
+		},
+	}
+
+	msgs, err := m.convertContent(content)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	text, ok := msgs[0].Content.(string)
+	if !ok {
+		t.Fatalf("Expected string content, got %T", msgs[0].Content)
+	}
+
+	if text != "Can you <think> about this?" {
+		t.Errorf("User message should NOT be modified, got %q", text)
+	}
+}
+
 // TestConvertToOpenAIMessages_Stateless tests the stateless conversion with system instruction,
 // JSON mode, and multi-turn contents.
 func TestConvertToOpenAIMessages_Stateless(t *testing.T) {

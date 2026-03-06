@@ -495,13 +495,11 @@ func (m *openaiModel) buildChatRequest(messages []OpenAIMessage, stream bool, re
 				chatReq.TopLogprobs = req.Config.Logprobs
 			}
 		}
-		// Map ResponseMIMEType to OpenAI response_format
-		if req.Config.ResponseMIMEType != "" {
-			if req.Config.ResponseMIMEType == "application/json" {
-				chatReq.ResponseFormat = &ResponseFormat{Type: "json_object"}
-			}
-		}
-		// ResponseSchema for structured outputs
+		// Map ResponseMIMEType to OpenAI response_format.
+		// Note: "json_object" type is NOT supported by many backends (LM Studio, vLLM with Qwen).
+		// When only ResponseMIMEType is set (no schema), we rely on the JSON instruction
+		// injected into the system prompt by convertToOpenAIMessages (see converters.go).
+		// When ResponseSchema is provided, we use "json_schema" which is widely supported.
 		if req.Config.ResponseSchema != nil {
 			schema := convertGenaiSchemaToMap(req.Config.ResponseSchema)
 			chatReq.ResponseFormat = &ResponseFormat{
